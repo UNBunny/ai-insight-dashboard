@@ -2,7 +2,9 @@ import { Button } from "../../components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/card"
 import { Textarea } from "../../components/ui/textarea"
 import { ThemeToggle } from "../../components/ui/theme-toggle"
-import React, { useState } from "react"
+import React, { useState, useEffect } from "react"
+import api from "../../utils/api"
+import { useAuthContext } from "../../context/auth-context"
 
 interface ResourceLink {
   title: string;
@@ -12,7 +14,9 @@ interface ResourceLink {
 interface InsightResponse {
   summary: string;
   keyConcepts: string[];
-  furtherReading: ResourceLink[];
+  recommendations: ResourceLink[];
+  timestamp?: Date;
+  topic?: string;
 }
 
 const Dashboard: React.FC = () => {
@@ -20,8 +24,18 @@ const Dashboard: React.FC = () => {
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [insights, setInsights] = useState<InsightResponse | null>(null);
-  
+  const { isAuthenticated } = useAuthContext();
+
+  useEffect(() => {
+    // Проверим статус авторизации при монтировании компонента
+    console.log('Dashboard компонент - статус аутентификации:', isAuthenticated ? 'Авторизован' : 'Не авторизован');
+    const token = localStorage.getItem('auth_token');
+    console.log('Dashboard компонент - токен в localStorage:', token ? 'Токен есть' : 'Токена нет');
+  }, [isAuthenticated]);
+
   // Функция для анализа темы с использованием AI API
+  const { logout } = useAuthContext();
+  
   const analyzeWithAI = async () => {
     if (!topic.trim()) {
       setError('Пожалуйста, введите тему для анализа');
@@ -32,23 +46,31 @@ const Dashboard: React.FC = () => {
     setError(null);
     
     try {
-      const response = await fetch('http://localhost:8081/api/ai/analyze', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ topic, maxResults: 5, language: 'ru' })
+      // Используем API утилиту с автоматической JWT авторизацией
+      console.log('Отправляем запрос на анализ с токеном:', localStorage.getItem('auth_token'));
+      // Используем путь относительно прокси с обновленным API путем
+      const data = await api.post('/api/v1/ai/analyze', { 
+        topic, 
+        maxResults: 5, 
+        language: 'ru' 
       });
       
-      if (!response.ok) {
-        throw new Error(`Ошибка запроса: ${response.status}`);
-      }
-      
-      const data = await response.json();
       setInsights(data);
-    } catch (err) {
+      console.log('Получены результаты анализа:', data);
+    } catch (err: any) {
       console.error('Ошибка при запросе к API:', err);
-      setError(`Не удалось получить данные: ${err instanceof Error ? err.message : 'Неизвестная ошибка'}`);
+      
+      // Проверяем, является ли это ошибкой аутентификации
+      if (err.isAuthError || err.status === 401) {
+        console.log('Обнаружена ошибка авторизации, выполняем выход');
+        setError('Сессия истекла, необходимо заново авторизоваться');
+        // Вызываем функцию выхода
+        setTimeout(() => {
+          logout(); // Это очистит токен и обновит состояние приложения
+        }, 2000); // Даем пользователю увидеть ошибку перед редиректом
+      } else {
+        setError(`Не удалось получить данные: ${err instanceof Error ? err.message : 'Неизвестная ошибка'}`);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -56,13 +78,7 @@ const Dashboard: React.FC = () => {
   return (
     <div className="min-h-screen bg-background">
       <div className="container mx-auto px-4 py-8 max-w-7xl">
-        {/* Header */}
-        <div className="flex justify-between items-center mb-8">
-          <h1 className="text-4xl font-bold tracking-tight text-foreground mb-2">AI-Insight Dashboard</h1>
-          <div className="flex items-center space-x-2">
-            <ThemeToggle />
-          </div>
-        </div>
+        {/* Здесь был Header с переключателем темы, который теперь перенесен в PublicLayout */}
 
         {/* Input Section */}
         <div className="mb-8">
@@ -134,9 +150,12 @@ const Dashboard: React.FC = () => {
                     <div className="h-4 bg-gray-200 dark:bg-gray-700 rounded w-3/4"></div>
                   </div>
                 ) : insights?.keyConcepts?.length ? (
-                  <ul className="list-disc list-inside space-y-1">
+                  <ul className="space-y-3">
                     {insights.keyConcepts.map((concept, index) => (
-                      <li key={index}>{concept}</li>
+                      <li key={index} className="flex items-start">
+                        <span className="inline-flex items-center justify-center rounded-full bg-blue-100 dark:bg-blue-900 text-blue-600 dark:text-blue-200 h-5 w-5 mr-3 flex-shrink-0 text-xs font-medium">{index + 1}</span>
+                        <span className="text-sm md:text-base">{concept}</span>
+                      </li>
                     ))}
                   </ul>
                 ) : (
@@ -157,18 +176,39 @@ const Dashboard: React.FC = () => {
                     <div className="h-5 bg-gray-200 dark:bg-gray-700 rounded w-4/5"></div>
                     <div className="h-5 bg-gray-200 dark:bg-gray-700 rounded w-2/3"></div>
                   </div>
-                ) : insights?.furtherReading?.length ? (
-                  <ul className="space-y-2">
-                    {insights.furtherReading.map((resource, index) => (
-                      <li key={index}>
-                        <a 
-                          href={resource.url} 
-                          target="_blank" 
-                          rel="noopener noreferrer"
-                          className="text-primary hover:underline"
-                        >
-                          {resource.title}
-                        </a>
+                ) : insights?.recommendations?.length ? (
+                  <ul className="space-y-4">
+                    {insights.recommendations.map((resource, index) => (
+                      <li key={index} className="border-l-2 border-blue-500 dark:border-blue-400 pl-4 py-1 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-r transition-colors duration-150">
+                        <div className="mb-1">
+                          <span className="font-medium text-sm text-slate-500 dark:text-slate-400">{index + 1}. </span>
+                           <a 
+                            href={resource.url} 
+                            target="_blank" 
+                            rel="noopener noreferrer"
+                            className="text-primary hover:underline font-medium inline-flex items-center group cursor-pointer"
+                          >
+                            {resource.title}
+                            <svg 
+                              className="w-4 h-4 ml-1 opacity-70 group-hover:opacity-100 transition-opacity" 
+                              xmlns="http://www.w3.org/2000/svg" 
+                              viewBox="0 0 20 20" 
+                              fill="currentColor"
+                            >
+                              <path fillRule="evenodd" d="M5.22 14.78a.75.75 0 001.06 0l7.22-7.22v5.69a.75.75 0 001.5 0v-7.5a.75.75 0 00-.75-.75h-7.5a.75.75 0 000 1.5h5.69l-7.22 7.22a.75.75 0 000 1.06z" clipRule="evenodd" />
+                            </svg>
+                          </a>
+                        </div>
+                        {resource.url && (
+                          <a 
+                            href={resource.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-sm text-slate-600 dark:text-slate-300 hover:text-blue-600 dark:hover:text-blue-300 transition-colors cursor-pointer underline"
+                          >
+                            {resource.url.replace(/^https?:\/\/(www\.)?/, '').split('/')[0]}
+                          </a>
+                        )}
                       </li>
                     ))}
                   </ul>

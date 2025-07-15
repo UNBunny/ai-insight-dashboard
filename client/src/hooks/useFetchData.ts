@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { ApiResponse } from '../interfaces';
+import api from '../utils/api';
 
 // Custom hook for fetching data from the API
 const useFetchData = (initialFetch: boolean = true) => {
@@ -12,13 +13,8 @@ const useFetchData = (initialFetch: boolean = true) => {
       setLoading(true);
       setError(null);
       
-      const response = await fetch('/api/data');
-      
-      if (!response.ok) {
-        throw new Error(`Error: ${response.status} - ${response.statusText}`);
-      }
-      
-      const result = await response.json();
+      // Используем API утилиту с автоматической JWT авторизацией
+      const result = await api.get('/api/v1/api/data');
       setData(result);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An unexpected error occurred');

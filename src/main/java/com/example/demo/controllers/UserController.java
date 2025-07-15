@@ -5,13 +5,18 @@ import com.example.demo.services.UserService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 @RestController
-@RequestMapping("/api/users")
+@RequestMapping("/users")
 @RequiredArgsConstructor
+@CrossOrigin(origins = "*", maxAge = 3600)
 public class UserController {
 
     private final UserService userService;
@@ -54,5 +59,29 @@ public class UserController {
             return ResponseEntity.noContent().build();
         }
         return ResponseEntity.notFound().build();
+    }
+    
+    /**
+     * Get the profile of the currently authenticated user
+     * @return User profile information
+     */
+    @GetMapping("/profile")
+    public ResponseEntity<?> getCurrentUserProfile() {
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        if (authentication == null || !authentication.isAuthenticated()) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Not authenticated");
+        }
+        
+        String username = authentication.getName();
+        var userOpt = userService.getUserByUsername(username);
+        
+        if (userOpt.isPresent()) {
+            return ResponseEntity.ok(userOpt.get());
+        } else {
+            Map<String, Object> response = new HashMap<>();
+            response.put("username", username);
+            response.put("authorities", authentication.getAuthorities());
+            return ResponseEntity.ok(response);
+        }
     }
 }

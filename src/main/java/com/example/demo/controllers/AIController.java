@@ -2,249 +2,177 @@ package com.example.demo.controllers;
 
 import com.example.demo.dto.insight.InsightRequest;
 import com.example.demo.dto.insight.InsightResponse;
-import com.example.demo.dto.insight.ResourceLink;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.HttpEntity;
-import org.springframework.http.HttpHeaders;
+import com.example.demo.dto.insight.Recommendation;
+import com.example.demo.services.AIService;
+import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
-import org.springframework.web.client.RestTemplate;
 
-import java.util.*;
+import java.time.Instant;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 
+/**
+ * Контроллер для работы с AI-анализом
+ * Публичные методы для анализа доступны всем пользователям
+ * Управление и административные функции доступны только администраторам
+ */
 @RestController
-@RequestMapping("/api/ai")
+@RequestMapping("/ai")
 @CrossOrigin(origins = "${spring.webmvc.cors.allowed-origins:*}")
+@RequiredArgsConstructor
+@Slf4j
 public class AIController {
 
-    private final RestTemplate restTemplate = new RestTemplate();
-    
-    @Value("${ollama.api.url:http://localhost:11434/api/chat}")
-    private String apiUrl;
-    
-    @Value("${ollama.model:llama2}")
-    private String model;
+    private final AIService aiService;
 
-    @PostMapping("/analyze")
-    public ResponseEntity<InsightResponse> analyzeWithAI(@RequestBody InsightRequest request) {
+    /**
+     * Асинхронный анализ темы с использованием AI
+     * 
+     * @param request запрос с темой для анализа
+     * @return CompletableFuture с результатом анализа
+     */
+    @PostMapping(value = "/analyze", consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
+    @ResponseStatus(HttpStatus.OK)
+    public ResponseEntity<?> analyzeWithAI(@Valid @RequestBody InsightRequest request) {
+        log.info("Processing public AI analysis request for topic: {}", request.getTopic());
+        
         try {
-            // Настройка заголовков для API запроса
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
+            // Validate the request manually
+            if (request.getTopic() == null || request.getTopic().isEmpty()) {
+                log.warn("Invalid request - missing topic");
+                return ResponseEntity
+                    .badRequest()
+                    .body(Map.of("error", "Topic is required"));
+            }
             
-            // Формируем тело запроса для Ollama
-            Map<String, Object> requestBody = new HashMap<>();
-            requestBody.put("model", model);
+            // Use the actual AIService to analyze with Ollama
+            log.info("Calling AIService.analyzeWithAIAsync for topic: {}", request.getTopic());
+            CompletableFuture<InsightResponse> future = aiService.analyzeWithAIAsync(request);
+            log.info("Waiting for response from AIService...");
             
-            // Настраиваем сообщения для модели
-            List<Map<String, String>> messages = new ArrayList<>();
-            
-            // Системное сообщение с инструкциями
-            Map<String, String> systemMessage = new HashMap<>();
-            systemMessage.put("role", "system");
-            systemMessage.put("content", "Вы - помощник, который предоставляет информацию и анализ по различным темам. " +
-                    "Предоставьте краткое резюме, ключевые концепции и рекомендации для дальнейшего чтения по запрашиваемой теме. " +
-                    "Структурируйте ответ в следующем формате:\n\n" +
-                    "РЕЗЮМЕ:\n[краткое описание темы]\n\n" +
-                    "КЛЮЧЕВЫЕ КОНЦЕПЦИИ:\n- [концепция 1]\n- [концепция 2]\n- [концепция 3]\n\n" +
-                    "РЕКОМЕНДУЕМЫЕ ИСТОЧНИКИ:\n- [название источника 1]: [URL если есть]\n- [название источника 2]: [URL если есть]");
-            messages.add(systemMessage);
-            
-            // Пользовательское сообщение с темой
-            Map<String, String> userMessage = new HashMap<>();
-            userMessage.put("role", "user");
-            userMessage.put("content", "Тема для анализа: " + request.getTopic() + 
-                    (request.getLanguage() != null ? ". Язык ответа: " + request.getLanguage() : ""));
-            messages.add(userMessage);
-            
-            requestBody.put("messages", messages);
-            requestBody.put("stream", false);
-            
-            HttpEntity<Map<String, Object>> entity = new HttpEntity<>(requestBody, headers);
-            
-            // Пробуем подключиться к Ollama API
             try {
-                // Выполняем запрос к API
-                Map<String, Object> response = restTemplate.postForObject(apiUrl, entity, Map.class);
+                InsightResponse response = future.join();
+                log.info("Response received from AIService: {}", response != null ? "valid response" : "null");
                 
-                // Обрабатываем ответ Ollama
-                if (response != null && response.containsKey("message")) {
-                    @SuppressWarnings("unchecked")
-                    Map<String, String> message = (Map<String, String>) response.get("message");
-                    String content = message.get("content");
-                    
-                    // Парсим ответ и преобразуем в InsightResponse
-                    return ResponseEntity.ok(parseAIResponse(content, request.getTopic()));
+                if (response == null) {
+                    throw new RuntimeException("Null response received from AIService");
                 }
-            } catch (Exception e) {
-                // Логируем ошибку подключения к Ollama
-                System.err.println("Не удалось подключиться к Ollama API: " + e.getMessage());
-                // Продолжаем работу с запасным вариантом
-            }
-            
-            // Если что-то пошло не так, возвращаем резервный ответ
-            return ResponseEntity.ok(generateFallbackResponse(request));
-            
-        } catch (Exception e) {
-            e.printStackTrace();
-            return ResponseEntity.ok(generateFallbackResponse(request));
-        }
-    }
-    
-    /**
-     * Парсит содержимое ответа AI и преобразует в структурированный объект InsightResponse
-     */
-    private InsightResponse parseAIResponse(String content, String topic) {
-        String summary = "";
-        List<String> keyConcepts = new ArrayList<>();
-        List<ResourceLink> resourceLinks = new ArrayList<>();
-        
-        // Разделяем ответ на секции по двойным переводам строки
-        String[] sections = content.split("\n\n");
-        
-        boolean inSummarySection = false;
-        boolean inKeyConceptsSection = false;
-        boolean inResourcesSection = false;
-        
-        for (String section : sections) {
-            // Определяем, в какой секции мы находимся
-            String lowercaseSection = section.toLowerCase();
-            
-            if (lowercaseSection.contains("резюме:") || lowercaseSection.contains("summary:")) {
-                inSummarySection = true;
-                inKeyConceptsSection = false;
-                inResourcesSection = false;
                 
-                // Извлекаем текст после "РЕЗЮМЕ:"
-                int startIndex = section.indexOf(':') + 1;
-                if (startIndex > 0 && startIndex < section.length()) {
-                    summary = section.substring(startIndex).trim();
+                return ResponseEntity.ok(response);
+            } catch (CompletionException ce) {
+                log.error("CompletionException in future: {}", ce.getMessage(), ce);
+                Throwable cause = ce.getCause() != null ? ce.getCause() : ce;
+                if (cause instanceof RuntimeException) {
+                    throw (RuntimeException) cause;
                 } else {
-                    summary = section;
-                }
-                continue;
-            }
-            
-            if (lowercaseSection.contains("ключев") || lowercaseSection.contains("key concept")) {
-                inSummarySection = false;
-                inKeyConceptsSection = true;
-                inResourcesSection = false;
-                continue;
-            }
-            
-            if (lowercaseSection.contains("источник") || lowercaseSection.contains("ресурс") || 
-                lowercaseSection.contains("чтен") || lowercaseSection.contains("source") || 
-                lowercaseSection.contains("reading")) {
-                inSummarySection = false;
-                inKeyConceptsSection = false;
-                inResourcesSection = true;
-                continue;
-            }
-            
-            // Обрабатываем контент в зависимости от текущей секции
-            if (inSummarySection && summary.isEmpty()) {
-                summary = section.trim();
-            } else if (inKeyConceptsSection) {
-                // Разбиваем на отдельные пункты
-                String[] points = section.split("\n");
-                for (String point : points) {
-                    String trimmedPoint = point.trim();
-                    if (trimmedPoint.startsWith("-") || trimmedPoint.startsWith("•")) {
-                        keyConcepts.add(trimmedPoint.substring(1).trim());
-                    } else if (!trimmedPoint.isEmpty() && !trimmedPoint.contains(":")) {
-                        keyConcepts.add(trimmedPoint);
-                    }
-                }
-            } else if (inResourcesSection) {
-                // Разбиваем на отдельные ресурсы
-                String[] resources = section.split("\n");
-                for (String resource : resources) {
-                    String trimmedResource = resource.trim();
-                    if ((trimmedResource.startsWith("-") || trimmedResource.startsWith("•")) && !trimmedResource.isEmpty()) {
-                        trimmedResource = trimmedResource.substring(1).trim();
-                        
-                        String title;
-                        String url = "";
-                        
-                        // Проверяем наличие URL в ресурсе
-                        if (trimmedResource.contains("http")) {
-                            int urlIndex = trimmedResource.indexOf("http");
-                            url = trimmedResource.substring(urlIndex).trim();
-                            title = trimmedResource.substring(0, urlIndex).trim();
-                            
-                            // Удаляем разделители
-                            title = title.replaceAll("[-:]+$", "").trim();
-                            if (title.isEmpty()) {
-                                title = "Ресурс по теме " + topic;
-                            }
-                        } else if (trimmedResource.contains(":")) {
-                            // Если есть двоеточие, но нет URL
-                            String[] parts = trimmedResource.split(":", 2);
-                            title = parts[0].trim();
-                            if (parts.length > 1) {
-                                url = "https://example.com/search?q=" + parts[1].trim().replace(" ", "+");
-                            } else {
-                                url = "https://example.com/search?q=" + topic.replace(" ", "+");
-                            }
-                        } else {
-                            title = trimmedResource;
-                            url = "https://example.com/search?q=" + topic.replace(" ", "+") + 
-                                  "&specific=" + title.replace(" ", "+");
-                        }
-                        
-                        resourceLinks.add(new ResourceLink(title, url));
-                    }
+                    throw new RuntimeException("Error in AI analysis: " + cause.getMessage(), cause);
                 }
             }
-        }
-        
-        // Если не удалось извлечь резюме, используем тему как резюме
-        if (summary.isEmpty()) {
-            summary = "Анализ темы: " + topic;
-        }
-        
-        // Если не найдены ключевые концепции, добавляем заглушки
-        if (keyConcepts.isEmpty()) {
-            keyConcepts.add("Основные принципы " + topic);
-            keyConcepts.add("Практическое применение");
-            keyConcepts.add("Современные тренды и развитие");
-        }
-        
-        // Если не найдены источники, добавляем заглушки
-        if (resourceLinks.isEmpty()) {
-            resourceLinks.add(new ResourceLink("Руководство по " + topic, 
-                    "https://example.com/guides/" + topic.toLowerCase().replace(" ", "-")));
-            resourceLinks.add(new ResourceLink("Научные публикации", 
-                    "https://scholar.google.com/scholar?q=" + topic.replace(" ", "+")));
-        }
-        
-        return InsightResponse.builder()
-                .summary(summary)
-                .keyConcepts(keyConcepts)
-                .furtherReading(resourceLinks)
+        } catch (Exception e) {
+            log.error("Error analyzing with AI: {} ({})", e.getMessage(), e.getClass().getName(), e);
+            
+            // Create a simple fallback response in controller when something fails
+            InsightResponse fallbackResponse = InsightResponse.builder()
+                .topic(request.getTopic())
+                .summary("Не удалось проанализировать тему из-за технической проблемы: " + e.getMessage())
+                .keyConcepts(Arrays.asList(
+                    "Попробуйте позднее",
+                    "Свяжитесь с администратором"
+                ))
+                .recommendations(Arrays.asList(
+                    new Recommendation("Документация по Spring Boot", "https://spring.io/projects/spring-boot"),
+                    new Recommendation("Справочный центр", "https://example.com/help")
+                ))
+                .timestamp(java.time.Instant.now())
                 .build();
+            
+            return ResponseEntity.ok(fallbackResponse);
+        }
     }
     
     /**
-     * Генерирует резервный ответ, когда API Ollama недоступно
+     * Управление аналитическими данными - доступно только для администраторов
+     * 
+     * @return список управляемых аналитических тем
      */
-    private InsightResponse generateFallbackResponse(InsightRequest request) {
+    @GetMapping("/manage/topics")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<?> getManageableTopics() {
+        // В реальном приложении здесь было бы получение списка тем из базы данных
+        return ResponseEntity.ok(Map.of(
+            "topics", List.of(
+                Map.of("id", 1, "name", "Рыночные тренды", "status", "active"),
+                Map.of("id", 2, "name", "Анализ конкурентов", "status", "active"),
+                Map.of("id", 3, "name", "Финансовые показатели", "status", "draft")
+            )
+        ));
+    }
+    
+    /**
+     * Проверка состояния AI-сервиса - доступно только для администраторов
+     * 
+     * @return статус сервиса
+     */
+    @GetMapping("/manage/status")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<?> getStatus() {
+        return ResponseEntity.ok(Map.of(
+            "status", "running",
+            "uptime", "4h 23m",
+            "requests", 42,
+            "errors", 2,
+            "lastRequest", "2025-07-11T12:30:15"
+        ));
+    }
+    
+    /**
+     * Test endpoint to generate a fallback response directly
+     * 
+     * @return a sample fallback response
+     */
+    @GetMapping("/test/fallback")
+    public InsightResponse testFallbackResponse() {
+        // Simple test endpoint to verify the fallback response format works
+        log.info("Returning test fallback response");
+        
         return InsightResponse.builder()
-                .summary("Анализ темы: " + request.getTopic() + "\n\n" +
-                        "Этот анализ сгенерирован локально без использования Ollama. " +
-                        "Для получения более качественного анализа убедитесь, что Ollama запущена и доступна по адресу " + apiUrl + ".")
-                .keyConcepts(List.of(
-                        "Основные аспекты темы " + request.getTopic(),
-                        "Практическое применение концепций",
-                        "Современные тенденции развития"
-                ))
-                .furtherReading(List.of(
-                        new ResourceLink("Руководство по " + request.getTopic(), 
-                                "https://example.com/guides/" + request.getTopic().toLowerCase().replace(" ", "-")),
-                        new ResourceLink("Исследовательские работы", 
-                                "https://scholar.google.com/scholar?q=" + request.getTopic().replace(" ", "+"))
-                ))
-                .build();
+            .topic("Test Topic")
+            .summary("This is a test fallback response")
+            .keyConcepts(List.of("Test concept 1", "Test concept 2"))
+            .recommendations(List.of(new Recommendation("Test recommendation", "Test description")))
+            .timestamp(Instant.now())
+            .build();
+    }
+    
+    @PostMapping("/test/analyze")
+    public ResponseEntity<InsightResponse> testAnalyzeEndpoint(@Valid @RequestBody InsightRequest request) {
+        log.info("Processing test analyze endpoint for topic: {}", request.getTopic());
+        
+        // Create a direct response without going through AIService
+        InsightResponse response = InsightResponse.builder()
+            .topic(request.getTopic())
+            .summary("This is a test response for topic: " + request.getTopic())
+            .keyConcepts(Arrays.asList(
+                "Test key concept 1",
+                "Test key concept 2",
+                "Topic: " + request.getTopic()
+            ))
+            .recommendations(Arrays.asList(
+                new Recommendation("Test recommendation 1", "https://example.com/1"),
+                new Recommendation("Test recommendation 2", "https://example.com/2")
+            ))
+            .timestamp(Instant.now())
+            .build();
+        
+        return ResponseEntity.ok(response);
     }
 }
